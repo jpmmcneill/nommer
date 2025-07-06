@@ -1,0 +1,12 @@
+[workspace]
+authors = ["James McNeill <jpmmcneill@gmail.com>"]
+channels = ["conda-forge"]
+name = "nommer"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+rust = ">=1.88.0,<1.89"
+python = ">=3.13.5,<3.14"
