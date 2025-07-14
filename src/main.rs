@@ -11,21 +11,23 @@ fn zap() -> i32 {
 mod parsers {
     use nom::{
         branch::alt,
-        bytes::{complete::{tag, take_while1}, take},
+        bytes::{complete::{tag, take_while1}, take, take_until},
         character::complete::{char, space1, digit1, multispace0},
         combinator::{map, map_res},
         multi::separated_list0,
         number::double,
-        sequence::{delimited, preceded, terminated},
+        sequence::{delimited, preceded, terminated, separated_pair},
         IResult,
         Parser
     };
+    use std::collections::HashMap;
 
     #[derive(Debug, PartialEq)]
     // this is a type that is all the options a parser can return
     enum Value<'a> {
         Str(&'a str),
         Array(Vec<Value<'a>>),
+        Map(HashMap<&'a str, Value<'a>>)
     }
 
     fn tag_basic(input: &str) -> IResult<&str, &str> {
@@ -36,23 +38,11 @@ mod parsers {
         tag("abc")(input)
     }
 
-    fn parse_key(input: &str) -> IResult<&str, &str> {
-        take_while1(|c: char| c.is_alphanumeric())(input)
-    }
-
     fn parse_digits(input: &str) -> IResult<&str, &str> {
         digit1(input)
     }
-    
-    fn parse_string(input: &str) -> IResult<&str, &str> {
-        delimited(
-            char('"'),
-            take_while1(|c| c != '"'),
-            char('"'),
-        ).parse(input)
-    }
 
-    fn parse_string_new(input: &str) -> IResult<&str, Value> {
+    fn parse_string(input: &str) -> IResult<&str, Value> {
         map(
             delimited(
                 char('"'),
@@ -63,30 +53,62 @@ mod parsers {
         ).parse(input)
     }
 
-    fn parse_array_basic(input: &str) -> IResult<&str, Vec<&str>> {
-        separated_list0(tag(" "), tag("abc")).parse(input)
-    }
-
-    fn parse_array(input: &str) -> IResult<&str, Vec<&str>> {
-        delimited(
-            tag("["),
-            separated_list0(tag(" "), parse_string
-            ),
-            tag("]"),
-        ).parse(input)
-    }
-
-    fn parse_array_new(input: &str) -> IResult<&str, Value> {
-        let parse_value = alt((parse_string_new, parse_array_new));
+    fn parse_array(input: &str) -> IResult<&str, Value> {
+        let parse_value = alt((parse_string, parse_array));
         map(
             delimited(tag("["), separated_list0(tag(" "), parse_value), tag("]")),
             Value::Array,
         ).parse(input)
     }
 
+    fn parse_key(input: &str) -> IResult<&str, &str> {
+        take_until("=").parse(input)
+    }
+
+    fn parse_map(input: &str) -> IResult<&str, Value> {
+        map(
+            delimited(
+                char('{'),
+                parse_key_value,
+                char('}')
+            ),
+            Value::Map
+        ).parse(input)
+    }
+
+    fn parse_value(input: &str) -> IResult<&str, Value> {
+        alt((
+            parse_string,
+            parse_array,
+            parse_map,
+        )).parse(input)
+    }
+
+    fn parse_key_value(input: &str) -> IResult<&str, HashMap<&str, Value>> {
+        let kv_parser = separated_pair(
+            parse_key,
+            char('='),
+            parse_value,
+        );
+
+        map(
+            separated_list0(multispace0, kv_parser),
+            |pairs| pairs.into_iter().collect::<HashMap<_, _>>()
+        ).parse(input)
+    }
+
+    pub fn parse_message(input: &str) -> IResult<&str, Value> {
+        delimited(
+            char('{'),
+            parse_key_value,
+            char('}')
+        ).parse(input)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+        use Value::{Str, Array, Map};
 
         #[test]
         fn test_tag_basic_success() {
@@ -109,49 +131,84 @@ mod parsers {
 
         #[test]
         fn test_parse_string() {
+            use Value::Str;
             let result = parse_string("xyz");
             assert!(result.is_err());
             let result = parse_string("\"xyz\"");
-            assert_eq!(result, Ok(("", "xyz")));
-            let result = parse_string("\"fizzbuzz\"zpzp");
-            assert_eq!(result, Ok(("zpzp", "fizzbuzz")));
-        }
-
-        #[test]
-        fn test_parse_string_new() {
-            use Value::Str;
-            let result = parse_string_new("xyz");
-            assert!(result.is_err());
-            let result = parse_string_new("\"xyz\"");
             assert_eq!(result, Ok(("", Str("xyz"))));
-            let result = parse_string_new("\"fizzbuzz\"zpzp");
+            let result = parse_string("\"fizzbuzz\"zpzp");
             assert_eq!(result, Ok(("zpzp", Str("fizzbuzz"))));
         }
 
         #[test]
-        fn test_parse_array_basic() {
-            let result = parse_array_basic("abc abc abc");
-            assert_eq!(result, Ok(("", vec!["abc", "abc", "abc"])));
-        }
-
-        #[test]
         fn test_parse_array() {
+            // this guy can parse a nested array!
             let result = parse_array("[\"abc\" \"abc\" \"abc\"]");
-            assert_eq!(result, Ok(("", vec!["abc", "abc", "abc"])));
+            assert_eq!(result, Ok(("", Array(vec![Str("abc"), Str("abc"), Str("abc")]))));
             let result = parse_array("[\"abc\" \"beeep\" \"foo\"]");
-            assert_eq!(result, Ok(("", vec!["abc", "beeep", "foo"])));
+            assert_eq!(result, Ok(("", Array(vec![Str("abc"), Str("beeep"), Str("foo")]))));
+            let result = parse_array("[\"abc\" \"beeep\" [\"wee\"] \"foo\"]");
+            assert_eq!(result, Ok(("", Array(vec![Str("abc"), Str("beeep"), Array(vec![Str("wee")]), Str("foo")]))));
+
+            let result = parse_array(r#"["abc" "beeep" ["fuzz" ["wee" "smat"] "food"] "foo"]"#);
+            assert_eq!(
+                result,
+                Ok((
+                    "",
+                    Value::Array(vec![
+                        Value::Str("abc"),
+                        Value::Str("beeep"),
+                        Value::Array(vec![
+                            Value::Str("fuzz"),
+                            Value::Array(vec![
+                                Value::Str("wee"),
+                                Value::Str("smat")
+                            ]),
+                            Value::Str("food"),
+                        ]),
+                        Value::Str("foo")
+                    ])
+                ))
+            );
+
+        #[test]
+        fn test_parse_key() {
+            let input = "myKey = \"value\"";
+            let (rest, key) = parse_key(input).unwrap();
+            assert_eq!(key, "myKey");
+            assert!(rest.starts_with(" = \"value\""));
         }
 
         #[test]
-        fn test_parse_array_new() {
-            use Value::Str;
-            use Value::Array;
-            let result = parse_array_new("[\"abc\" \"abc\" \"abc\"]");
-            assert_eq!(result, Ok(("", Array(vec![Str("abc"), Str("abc"), Str("abc")]))));
-            let result = parse_array_new("[\"abc\" \"beeep\" \"foo\"]");
-            assert_eq!(result, Ok(("", Array(vec![Str("abc"), Str("beeep"), Str("foo")]))));
-            let result = parse_array_new("[\"abc\" \"beeep\" [\"wee\"] \"foo\"]");
-            assert_eq!(result, Ok(("", Array(vec![Str("abc"), Str("beeep"), Array(vec![Str("wee")]), Str("foo")]))));
+        fn test_parse_value() {
+            // test string
+            let input = r#""hello""#;
+            let (rest, value) = parse_value(input).unwrap();
+            assert_eq!(value, Str("hello"));
+            assert_eq!(rest, "");
+
+            // test array
+            let input = r#"["a" "b" "c"]"#;
+            let (rest, value) = parse_value(input).unwrap();
+            assert_eq!(
+                value,
+                Array(vec![Str("a"), Str("b"), Str("c")])
+            );
+            assert_eq!(rest, "");
+
+            let input = r#"{"bar"="baz" nest=["a" "b"]}"#;
+            let (rest, value) = parse_value(input).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                value,
+                Map(
+                    vec![
+                        ("bar", Str("baz")),
+                        ("nest", Array(vec![Str("a"), Str("b")]))
+                    ].into_iter().collect()
+                )
+            );
+        }
         }
     }
 }

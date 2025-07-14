@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 nom = "8.0.0"
+pyo3 = "0.25.1"
